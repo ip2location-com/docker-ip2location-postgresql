@@ -1,32 +1,104 @@
 #!/bin/bash
 
-error() { echo -e "\e[91m$1\e[m"; exit 0; }
-success() { echo -e "\e[92m$1\e[m"; }
+if [ -n "$NO_COLOR" ]; then
+	C_RESET=; C_DIM=; C_BOLD=; C_OK=; C_WARN=; C_ERR=
+else
+	C_RESET=$'\e[0m'; C_DIM=$'\e[2m'; C_BOLD=$'\e[1m'
+	C_OK=$'\e[32m'; C_WARN=$'\e[33m'; C_ERR=$'\e[31m'
+fi
+
+STEP_N=0
+STEP_WIDTH=58
+
+banner() {
+	printf '\n%s  %s%s\n%s  %s%s\n\n' \
+		"$C_BOLD" "$1" "$C_RESET" \
+		"$C_DIM" "$(printf '─%.0s' $(seq 1 $((${#1} + 2))))" "$C_RESET"
+}
+
+step() {
+	STEP_N=$((STEP_N + 1))
+	printf '  %s%2d.%s ' "$C_DIM" "$STEP_N" "$C_RESET"
+	if [ $((${#1} + 1)) -le "$STEP_WIDTH" ]; then
+		printf '%s ' "$1"
+		printf '%s%s%s ' "$C_DIM" "$(printf '·%.0s' $(seq 1 $((STEP_WIDTH - ${#1}))))" "$C_RESET"
+	else
+		printf '%s\n     ' "$1"
+	fi
+	printf '%s' "$C_DIM"
+}
+ok()   { if [ -n "$1" ]; then printf '%s✓%s %s(%s)%s\n' "$C_OK" "$C_RESET" "$C_DIM" "$1" "$C_RESET"; else printf '%s✓%s\n' "$C_OK" "$C_RESET"; fi; }
+warn() { printf '%s!%s %s%s%s\n' "$C_WARN" "$C_RESET" "$C_DIM" "$1" "$C_RESET"; }
+fail() { printf '%s✗%s %s\n' "$C_ERR" "$C_RESET" "$1"; exit 1; }
+note()  { printf '     %s%s%s\n' "$C_DIM" "$1" "$C_RESET"; }
+field() { printf '  %s%-9s%s %s\n' "$C_DIM" "$1" "$C_RESET" "$2"; }
+
+group() {
+	local n="$1" out=""
+	while [ ${#n} -gt 3 ]; do
+		out=",${n: -3}${out}"
+		n="${n:0:${#n}-3}"
+	done
+	printf '%s%s' "$n" "$out"
+}
+
+summary() {
+	printf '\n  %s✓%s %s%s%s\n' "$C_OK" "$C_RESET" "$C_BOLD$C_OK" "$1" "$C_RESET"
+	[ -n "$2" ] && printf '    %s%s%s\n' "$C_DIM" "$2" "$C_RESET"
+	printf '\n'
+}
 
 USER_AGENT="Mozilla/5.0+(compatible; IP2Location/PostgreSQL-Docker; https://hub.docker.com/r/ip2location/postgresql)"
-CODES=("DB1-LITE DB3-LITE DB5-LITE DB9-LITE DB11-LITE DB1 DB2 DB3 DB4 DB5 DB6 DB7 DB8 DB9 DB10 DB11 DB12 DB13 DB14 DB15 DB16 DB17 DB18 DB19 DB20 DB21 DB22 DB23 DB24 DB25 DB26")
+CODES=(DB1-LITE DB3-LITE DB5-LITE DB9-LITE DB11-LITE DB1 DB2 DB3 DB4 DB5 DB6 DB7 DB8 DB9 DB10 DB11 DB12 DB13 DB14 DB15 DB16 DB17 DB18 DB19 DB20 DB21 DB22 DB23 DB24 DB25 DB26)
+
+trim() { local v="${1//$'\r'/}"; v="${v#"${v%%[![:space:]]*}"}"; v="${v%"${v##*[![:space:]]}"}"; printf '%s' "$v"; }
+
+TOKEN="$(trim "$TOKEN")"
+CODE="$(trim "$CODE")"
+IP_TYPE="$(trim "$IP_TYPE")"
+CODE_INPUT="$CODE"
 
 PSQL_VERSION=$(psql -V | awk '{ print $3 }' | cut -d. -f1)
+PG_CONF="/etc/postgresql/$PSQL_VERSION/main/postgresql.conf"
+PG_HBA="/etc/postgresql/$PSQL_VERSION/main/pg_hba.conf"
 
-if [ -z "$(grep '0.0.0.0' /etc/postgresql/$PSQL_VERSION/main/pg_hba.conf)" ]; then
-	sed -i 's/^\#listen_addresses.*/listen_addresses = '\''*'\''/g' /etc/postgresql/$PSQL_VERSION/main/postgresql.conf
-	echo "host	all	all	0.0.0.0/0	md5" >> /etc/postgresql/$PSQL_VERSION/main/pg_hba.conf
+if [ -f "$PG_HBA" ] && [ -z "$(grep '0.0.0.0' "$PG_HBA")" ]; then
+	sed -i 's/^\#listen_addresses.*/listen_addresses = '\''*'\''/g' "$PG_CONF"
+	echo "host	all	all	0.0.0.0/0	md5" >> "$PG_HBA"
 fi
 
 if [ -f /ip2location.conf ]; then
+	CONF_TOKEN="$(grep '^TOKEN=' /ip2location.conf | cut -d= -f2-)"
+	CONF_CODE="$(grep '^CODE=' /ip2location.conf | cut -d= -f2-)"
+	CONF_IP_TYPE="$(grep '^IP_TYPE=' /ip2location.conf | cut -d= -f2-)"
+	CONF_PASSWORD="$(grep '^POSTGRESQL_PASSWORD=' /ip2location.conf | cut -d= -f2-)"
+
+	if [ -n "$CODE_INPUT" ] && [ "$CODE_INPUT" != "$CONF_CODE" ]; then
+		echo " > NOTE: CODE has changed from '$CONF_CODE' to '$CODE_INPUT', but the database"
+		echo " >       is already installed. The existing data is kept. To install"
+		echo " >       '$CODE_INPUT' instead, start a fresh container with an empty volume."
+	fi
+	if [ -n "$TOKEN" ] && [ "$TOKEN" != "$CONF_TOKEN" ]; then
+		echo " > NOTE: TOKEN has changed but is not re-applied to an existing install."
+	fi
+	if [ -n "$IP_TYPE" ] && [ "$IP_TYPE" != "$CONF_IP_TYPE" ]; then
+		echo " > NOTE: IP_TYPE has changed from '$CONF_IP_TYPE' to '$IP_TYPE', but the"
+		echo " >       database is already installed and is not converted in place."
+		echo " >       To install '$IP_TYPE', start a fresh container with an empty volume."
+	fi
+	if [ -n "$POSTGRESQL_PASSWORD" ] && [ "$POSTGRESQL_PASSWORD" != "$CONF_PASSWORD" ]; then
+		echo " > NOTE: POSTGRESQL_PASSWORD has changed but the existing password is kept."
+		echo " >       Change it with: ALTER USER postgres WITH PASSWORD '...';"
+	fi
+
 	service postgresql start >/dev/null 2>&1
 	tail -f /dev/null
 fi
 
-if [ "$TOKEN" == "FALSE" ]; then
-	error "Missing download token."
-fi
+[ -z "$TOKEN" ] && fail "Missing download token. Pass it with -e TOKEN=..."
+[ -z "$CODE" ] && fail "Missing database code. Pass it with -e CODE=... (e.g. DB1-LITE)"
 
-if [ "$CODE" == "FALSE" ]; then
-	error "Missing database code."
-fi
-
-if [ "$POSTGRESQL_PASSWORD" == "FALSE" ]; then
+if [ -z "$POSTGRESQL_PASSWORD" ]; then
 	POSTGRESQL_PASSWORD="$(< /dev/urandom tr -dc _A-Z-a-z-0-9 | head -c${1:-12})"
 fi
 
@@ -37,72 +109,84 @@ for i in "${CODES[@]}"; do
 	fi
 done
 
-if [ -z $FOUND == "" ]; then
-	error "Download code is invalid."
+if [ -z "$FOUND" ]; then
+	fail "Download code '$CODE' is invalid. See the README for the list of supported codes."
 fi
 
 CODE=$(echo $CODE | sed 's/-//')
 
-echo -n " > Create directory /_tmp "
-
-mkdir /_tmp
-
-[ ! -d /_tmp ] && error "[ERROR]" || success "[OK]"
-
-cd /_tmp
-
-echo -n " > Download IP2Location database "
-
 if [ "$IP_TYPE" == "IPV6" ]; then
-	wget -O ipv6.zip -q --user-agent="$USER_AGENT" "https://www.ip2location.com/download?token=${TOKEN}&code=${CODE}CSVIPV6" > /dev/null 2>&1
-
-	[ ! -z "$(grep 'NO PERMISSION' ipv6.zip)" ] && error "[DENIED]"
-	[ ! -z "$(grep '5 TIMES' ipv6.zip)" ] && error "[QUOTA EXCEEDED]"
-
-	RESULT=$(unzip -t ipv6.zip >/dev/null 2>&1)
-
-	[ $? -ne 0 ] && error "[FILE CORRUPTED]"
+	IP_TYPE="IPV6"
+	SUFFIX="CSVIPV6"
 else
-	wget -O ipv4.zip -q --user-agent="$USER_AGENT" "https://www.ip2location.com/download?token=${TOKEN}&code=${CODE}CSV" > /dev/null 2>&1
-
-	[ ! -z "$(grep 'NO PERMISSION' ipv4.zip)" ] && error "[DENIED]"
-	[ ! -z "$(grep '5 TIMES' ipv4.zip)" ] && error "[QUOTA EXCEEDED]"
-
-	RESULT=$(unzip -t ipv4.zip >/dev/null 2>&1)
-
-	[ $? -ne 0 ] && error "[FILE CORRUPTED]"
+	[ -n "$IP_TYPE" ] && [ "$IP_TYPE" != "IPV4" ] && echo " > IP_TYPE '$IP_TYPE' is not recognised, using IPV4."
+	IP_TYPE="IPV4"
+	SUFFIX="CSV"
 fi
 
-success "[OK]"
+banner "IP2Location Database Setup"
+field "Database" "ip2location_database"
+field "Code" "$CODE_INPUT"
+field "IP type" "$IP_TYPE"
 
-for ZIP in $(ls | grep '.zip'); do
-	CSV=$(unzip -l $ZIP | sort -nr | grep -Eio 'IP(V6)?.*CSV' | head -n 1)
+step "Create directory /_tmp"
 
-	echo -n " > Decompress $CSV from $ZIP"
+rm -rf /_tmp
+mkdir /_tmp
 
-	unzip -oq $ZIP $CSV
+[ ! -d /_tmp ] && fail "ERROR" || ok
+cd /_tmp
 
-	if [ ! -f $CSV ]; then
-		error "[ERROR]"
-	fi
+step "Download IP2Location $IP_TYPE database"
 
-	success "[OK]"
-done
+ARCHIVE="/_tmp/database.zip"
 
+wget -O "$ARCHIVE" -q --user-agent="$USER_AGENT" "https://www.ip2location.com/download?token=${TOKEN}&code=${CODE}${SUFFIX}" > /dev/null 2>&1
+
+[ ! -z "$(grep 'NO PERMISSION' "$ARCHIVE")" ] && fail "DENIED"
+[ ! -z "$(grep '5 TIMES' "$ARCHIVE")" ] && fail "QUOTA EXCEEDED"
+
+unzip -t "$ARCHIVE" >/dev/null 2>&1
+
+[ $? -ne 0 ] && fail "FILE CORRUPTED"
+
+ok
+CSV=$(unzip -l "$ARCHIVE" | sort -nr | grep -Eio 'IP(V6)?.*CSV' | head -n 1)
+
+step "Decompress $CSV from $ARCHIVE"
+
+FIRST="$(unzip -p "$ARCHIVE" "$CSV" 2>/dev/null | head -n 1)"
+
+# The table keeps no ip_from column, so the CSV's leading field has to be
+# dropped. Neither LOAD DATA nor COPY can skip a column, and handing a loader
+# one field too many shifts every column one position to the left -- silently
+# in MariaDB, and as a hard failure in PostgreSQL. Strip it here instead,
+# streaming straight out of the archive so no second copy is written.
+[ -z "$(echo "$FIRST" | grep -E '^"?[0-9]+"?,')" ] && fail "Unexpected CSV layout: $FIRST"
+
+unzip -p "$ARCHIVE" "$CSV" | sed -E 's/^"?[0-9]+"?,//' > "$CSV"
+
+[ ! -f "/_tmp/$CSV" ] && fail "ERROR"
+
+ok
 service postgresql start >/dev/null
 
-echo -n ' > [PostgreSQL] Create database "ip2location_database" '
+step "Create database \"ip2location_database\""
 
 RESPONSE="$(sudo -u postgres createdb ip2location_database 2>&1)"
 
-[ ! -z "$(echo $RESPONSE | grep 'FATAL')" ] && error '[ERROR]' || success '[OK]'
+[ ! -z "$(echo $RESPONSE | grep 'FATAL')" ] && fail "$RESPONSE" || ok
+step "Create table \"ip2location_database_tmp\""
 
-echo -n ' > [PostgreSQL] Create table "ip2location_database_tmp" '
+RESPONSE="$(sudo -u postgres psql -c 'DROP TABLE IF EXISTS ip2location_database_tmp;' ip2location_database 2>&1)"
+
+[ ! -z "$(echo $RESPONSE | grep 'ERROR')" ] && fail "$RESPONSE"
 
 case "$CODE" in
 	DB1|DB1LITE )
 		FIELDS=''
 	;;
+
 	DB2 )
 		FIELDS=',isp varchar(255) NOT NULL'
 	;;
@@ -198,93 +282,66 @@ case "$CODE" in
 	DB25 )
 		FIELDS=',region_name varchar(128) NOT NULL,city_name varchar(128) NOT NULL,latitude varchar(20) NOT NULL,longitude varchar(20) NOT NULL,zip_code varchar(30) NULL DEFAULT NULL,time_zone varchar(8) NULL DEFAULT NULL,isp varchar(255) NOT NULL,domain varchar(128) NOT NULL,net_speed varchar(8) NOT NULL,idd_code varchar(5) NOT NULL,area_code varchar(30) NOT NULL,weather_station_code varchar(10) NOT NULL,weather_station_name varchar(128) NOT NULL,mcc varchar(128) NULL DEFAULT NULL,mnc varchar(128) NULL DEFAULT NULL,mobile_brand varchar(128) NULL DEFAULT NULL,elevation integer NOT NULL,usage_type varchar(11) NOT NULL,address_type char(1) NOT NULL,category varchar(10) NOT NULL'
 	;;
-	
+
 	DB26 )
 		FIELDS=',region_name varchar(128) NOT NULL,city_name varchar(128) NOT NULL,latitude varchar(20) NOT NULL,longitude varchar(20) NOT NULL,zip_code varchar(30) NULL DEFAULT NULL,time_zone varchar(8) NULL DEFAULT NULL,isp varchar(255) NOT NULL,domain varchar(128) NOT NULL,net_speed varchar(8) NOT NULL,idd_code varchar(5) NOT NULL,area_code varchar(30) NOT NULL,weather_station_code varchar(10) NOT NULL,weather_station_name varchar(128) NOT NULL,mcc varchar(128) NULL DEFAULT NULL,mnc varchar(128) NULL DEFAULT NULL,mobile_brand varchar(128) NULL DEFAULT NULL,elevation integer NOT NULL,usage_type varchar(11) NOT NULL,address_type char(1) NOT NULL,category varchar(10) NOT NULL,district varchar(128) NOT NULL,asn varchar(10) NOT NULL,"as" varchar(256) NOT NULL,"as_domain" varchar(128) NOT NULL,"as_usage_type" varchar(11) NOT NULL,"as_cidr" varchar(43) NOT NULL'
 	;;
-
-	PX1|PX1LITECSV )
-		FIELDS=',country_code char(2) NOT NULL,country_name varchar(64) NOT NULL'
-	;;
-
-	PX2|PX2LITECSV )
-		FIELDS=',proxy_type varchar(3) NOT NULL, country_code char(2) NOT NULL,country_name varchar(64) NOT NULL'
-	;;
-
-	PX3|PX3LITECSV )
-		FIELDS=',proxy_type varchar(3) NOT NULL, country_code char(2) NOT NULL,country_name varchar(64) NOT NULL,region_name varchar(128) NOT NULL,city_name varchar(128) NOT NULL'
-	;;
-
-	PX4|PX4LITECSV )
-		FIELDS=',proxy_type varchar(3) NOT NULL, country_code char(2) NOT NULL,country_name varchar(64) NOT NULL,region_name varchar(128) NOT NULL,city_name varchar(128) NOT NULL,isp varchar(255) NOT NULL'
-	;;
-
-	PX5|PX5LITECSV )
-		FIELDS=',proxy_type varchar(3) NOT NULL, country_code char(2) NOT NULL,country_name varchar(64) NOT NULL,region_name varchar(128) NOT NULL,city_name varchar(128) NOT NULL,isp varchar(255) NOT NULL,domain varchar(128) NOT NULL'
-	;;
-
-	PX6|PX6LITECSV )
-		FIELDS=',proxy_type varchar(3) NOT NULL, country_code char(2) NOT NULL,country_name varchar(64) NOT NULL,region_name varchar(128) NOT NULL,city_name varchar(128) NOT NULL,isp varchar(255) NOT NULL,domain varchar(128) NOT NULL,usage_type varchar(11) NOT NULL'
-	;;
-
-	PX7|PX7LITECSV )
-		FIELDS=',proxy_type varchar(3) NOT NULL, country_code char(2) NOT NULL,country_name varchar(64) NOT NULL,region_name varchar(128) NOT NULL,city_name varchar(128) NOT NULL,isp varchar(255) NOT NULL,domain varchar(128) NOT NULL,usage_type varchar(11) NOT NULL,asn varchar(6) NOT NULL,"as" varchar(256)'
-	;;
-
-	PX8|PX8LITECSV )
-		FIELDS=',proxy_type varchar(3) NOT NULL, country_code char(2) NOT NULL,country_name varchar(64) NOT NULL,region_name varchar(128) NOT NULL,city_name varchar(128) NOT NULL,isp varchar(255) NOT NULL,domain varchar(128) NOT NULL,usage_type varchar(11) NOT NULL,asn varchar(6) NOT NULL,"as" varchar(256),last_seen integer NOT NULL'
-	;;
-
-	PX9|PX9LITECSV )
-		FIELDS=',proxy_type varchar(3) NOT NULL, country_code char(2) NOT NULL,country_name varchar(64) NOT NULL,region_name varchar(128) NOT NULL,city_name varchar(128) NOT NULL,isp varchar(255) NOT NULL,domain varchar(128) NOT NULL,usage_type varchar(11) NOT NULL,asn varchar(6) NOT NULL,"as" varchar(256),last_seen integer NOT NULL,threat varchar(128) NOT NULL'
-	;;
-
-	PX10|PX10LITECSV )
-		FIELDS=',proxy_type varchar(3) NOT NULL, country_code char(2) NOT NULL,country_name varchar(64) NOT NULL,region_name varchar(128) NOT NULL,city_name varchar(128) NOT NULL,isp varchar(255) NOT NULL,domain varchar(128) NOT NULL,usage_type varchar(11) NOT NULL,asn varchar(6) NOT NULL,"as" varchar(256),last_seen integer NOT NULL,threat varchar(128) NOT NULL'
-	;;
-
-	PX11|PX11LITECSV )
-		FIELDS=',proxy_type varchar(3) NOT NULL, country_code char(2) NOT NULL,country_name varchar(64) NOT NULL,region_name varchar(128) NOT NULL,city_name varchar(128) NOT NULL,isp varchar(255) NOT NULL,domain varchar(128) NOT NULL,usage_type varchar(11) NOT NULL,asn varchar(6) NOT NULL,"as" varchar(256),last_seen integer NOT NULL,threat varchar(128) NOT NULL,provider varchar(256) NOT NULL'
-	;;
-	
-	PX12|PX12LITECSV )
-		FIELDS=',proxy_type varchar(3) NOT NULL, country_code char(2) NOT NULL,country_name varchar(64) NOT NULL,region_name varchar(128) NOT NULL,city_name varchar(128) NOT NULL,isp varchar(255) NOT NULL,domain varchar(128) NOT NULL,usage_type varchar(11) NOT NULL,asn varchar(6) NOT NULL,"as" varchar(256),last_seen integer NOT NULL,threat varchar(128) NOT NULL,provider varchar(256) NOT NULL,fraud_score integer NOT NULL'
-	;;
 esac
 
-RESPONSE="$(sudo -u postgres psql -c 'CREATE TABLE ip2location_database_tmp (ip_from decimal(39,0) NOT NULL,ip_to decimal(39,0) NOT NULL,country_code character(2) NOT NULL,country_name varchar(64) NOT NULL '"$FIELDS"', CONSTRAINT idx_key PRIMARY KEY (ip_to));' ip2location_database 2>&1)"
+RESPONSE="$(sudo -u postgres psql -c 'CREATE TABLE ip2location_database_tmp (ip_to decimal(39,0) NOT NULL,country_code character(2) NOT NULL,country_name varchar(64) NOT NULL '"$FIELDS"', CONSTRAINT idx_key PRIMARY KEY (ip_to));' ip2location_database 2>&1)"
 
-[ -z "$(echo $RESPONSE | grep 'CREATE TABLE')" ] && error '[ERROR]' || success '[OK]'
+[ -z "$(echo "$RESPONSE" | grep -E '^CREATE TABLE')" ] && fail "$RESPONSE" || ok
 
-for CSV in $(ls | grep -i '.CSV'); do
-	echo -n " > [PostgreSQL] Load $CSV into database "
-	RESPONSE=$(sudo -u postgres psql -c 'COPY ip2location_database_tmp FROM '\''/_tmp/'$CSV''\'' WITH CSV QUOTE AS '\''"'\'';' ip2location_database 2>&1)
+step "Load $CSV into database"
 
-	[ -z "$(echo $RESPONSE | grep 'COPY')" ] && error '[ERROR]' || success '[OK]'
-done
+RESPONSE="$(sudo -u postgres psql -c '\copy ip2location_database_tmp FROM '\''/_tmp/'"$CSV"''\'' WITH (FORMAT csv, QUOTE '\''"'\'')' ip2location_database 2>&1)"
 
-echo -n ' > [PostgreSQL] Rename table "ip2location_database_tmp" to "ip2location_database" '
+[ -z "$(echo "$RESPONSE" | grep -E '^COPY [0-9]')" ] && fail "$RESPONSE" || ok
+step "Activate ip2location_database"
 
-RESPONSE="$(sudo -u postgres psql -c 'ALTER TABLE ip2location_database_tmp RENAME TO ip2location_database;' ip2location_database 2>&1)"
+RESPONSE="$(sudo -u postgres psql -c 'DROP TABLE IF EXISTS ip2location_database; ALTER TABLE ip2location_database_tmp RENAME TO ip2location_database;' ip2location_database 2>&1)"
 
-[ ! -z "$(echo $RESPONSE | grep 'ERROR')" ] &&  error '[ERROR]' || success '[OK]'
+[ ! -z "$(echo $RESPONSE | grep 'ERROR')" ] && fail "$RESPONSE" || ok
+step "Create function \"IP_ATON\""
 
-sudo -u postgres psql -d ip2location_database -c "CREATE FUNCTION ip2int(inet) RETURNS bigint AS \$\$ SELECT \$1 - '0.0.0.0'::inet \$\$ LANGUAGE SQL strict immutable;GRANT execute ON FUNCTION ip2int(inet) TO public;" > /dev/null
+cat > /_tmp/ip_aton.sql << 'SQL'
+CREATE OR REPLACE FUNCTION IP_ATON(ip inet) RETURNS numeric AS $$
+DECLARE h text; r numeric := 0;
+BEGIN
+	IF family(ip) = 4 THEN RETURN host(ip)::inet - '0.0.0.0'::inet; END IF;
+	-- inet_send() prefixes a 4-byte header; the address is the remaining 16 bytes.
+	h := substr(encode(inet_send(ip), 'hex'), 9);
+	FOR i IN 1..4 LOOP
+		r := r * 4294967296 + ('x' || substr(h, i*8-7, 8))::bit(32)::bigint;
+	END LOOP;
+	RETURN r;
+END $$ LANGUAGE plpgsql IMMUTABLE;
+
+GRANT execute ON FUNCTION IP_ATON(inet) TO public;
+SQL
+
+RESPONSE="$(sudo -u postgres psql -q -d ip2location_database -f /_tmp/ip_aton.sql 2>&1)"
+RESPONSE="$RESPONSE$(sudo -u postgres psql -t -A -d ip2location_database -c "SELECT IP_ATON('8.8.8.8'::inet)" 2>&1)"
+
+[ "$(echo $RESPONSE | tr -d ' ')" == "134744072" ] && ok || fail "$RESPONSE"
+
 sudo -u postgres psql -d postgres -c "ALTER USER postgres WITH PASSWORD '$POSTGRESQL_PASSWORD';" > /dev/null
 
-echo "  > Setup completed"
-echo ""
-echo "  > You can now connect to this PostgreSQL Server using:"
-echo ""
-echo "   psql -h HOST -p PORT --username=postgres"
-echo "   Password: $POSTGRESQL_PASSWORD"
-echo ""
+banner "IP2Location Database Ready"
+ROWS="$(sudo -u postgres psql -t -A -d ip2location_database -c 'SELECT COUNT(*) FROM ip2location_database' 2>/dev/null)"
+summary "Setup completed" "$(group "$ROWS") records loaded from $CODE_INPUT ($IP_TYPE)"
+field "Host" "ip2location"
+field "Database" "ip2location_database"
+field "User" "postgres"
+field "Password" "$POSTGRESQL_PASSWORD"
+printf '\n  %spsql -h ip2location -U postgres -d ip2location_database%s\n' "$C_DIM" "$C_RESET"
+printf '\n'
 
 rm -rf /_tmp
 
 echo "POSTGRESQL_PASSWORD=$POSTGRESQL_PASSWORD" > /ip2location.conf
 echo "TOKEN=$TOKEN" >> /ip2location.conf
-echo "CODE=$CODE" >> /ip2location.conf
+echo "CODE=$CODE_INPUT" >> /ip2location.conf
 echo "IP_TYPE=$IP_TYPE" >> /ip2location.conf
 
 cd /
