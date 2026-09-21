@@ -50,7 +50,7 @@ summary() {
 
 [ ! -f /ip2location.conf ] && fail "Missing configuration file."
 
-banner "IP2Location Update"
+banner "IP2Location Database Update"
 
 USER_AGENT="Mozilla/5.0+(compatible; IP2Location/PostgreSQL-Docker; https://hub.docker.com/r/ip2location/postgresql)"
 TOKEN=$(grep '^TOKEN=' /ip2location.conf | cut -d= -f2-)
